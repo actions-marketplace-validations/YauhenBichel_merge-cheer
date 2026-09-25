@@ -3,14 +3,20 @@
 
 from __future__ import annotations
 
+import html
 import json
 import os
 import random
+import re
 import sys
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+
+# Files are 280px. Show that size in the comment — 2× was too large.
+GIF_DISPLAY_WIDTH = 280
 
 # Public group names. Users pass these as `topic`.
 GROUPS = (
@@ -216,7 +222,19 @@ _TITLE_RULES = (
     ("ship", ("feat", "add ", "added", "new ", "launch", "ship:", "ship ", "perf:", "perf ")),
     ("docs", ("doc", "readme")),
     ("tests", ("test", " ci", "ci:", "ci ", "-ci")),
-    ("cleanup", ("refactor", "clean", "deps:", "deps ")),
+    (
+        "cleanup",
+        (
+            "refactor",
+            "clean",
+            "deps:",
+            "deps ",
+            "typo",
+            "style",
+            "lint",
+            "format",
+        ),
+    ),
     ("welcome", ("welcome", "first contrib", "good first", "first-time")),
     ("party", ("party", "congrats", "woo", "hooray", "celebrate")),
     ("space", ("cosmos", "galaxy", "orbit", "planet", "outer space")),
@@ -240,6 +258,16 @@ _TITLE_RULES = (
     ("cpp", ("c++", "cplusplus", " cpp", "cpp:", "cpp ")),
     ("golang", ("golang", "gopher")),
     ("java", ("java:", "java ", "jdk", "jvm", "spring boot")),
+    # After mood groups so "chore: coffee" stays coffee. Prefixes only —
+    # "choreography" must not match.
+    ("cleanup", ("chore:", "chore ")),
+)
+
+# Conventional prefixes, start of title only. "rebuild" must not match
+# "build ", and "docker" must not steal via the docs "doc" substring
+# after a later word scan — these run first.
+_TITLE_PREFIXES = (
+    ("tests", ("build:", "build ")),
 )
 
 
@@ -256,11 +284,27 @@ def normalize_topic(value: str) -> str:
     return ALIASES.get(raw, "")
 
 
-def pick_from_title(title: str, association: str = "") -> str:
-    low = title.lower()
+def _first_title_match(text: str) -> str:
+    low = (text or "").lower()
+    if not low.strip():
+        return ""
+    stripped = low.lstrip()
+    for group, prefixes in _TITLE_PREFIXES:
+        if any(stripped.startswith(prefix) for prefix in prefixes):
+            return group
     for group, words in _TITLE_RULES:
         if any(word in low for word in words):
             return group
+    return ""
+
+
+def pick_from_title(title: str, association: str = "", body: str = "") -> str:
+    matched = _first_title_match(title)
+    if matched:
+        return matched
+    matched = _first_title_match(body)
+    if matched:
+        return matched
     if association.upper() in FIRST_TIMERS:
         return "welcome"
     return "celebration"
@@ -272,14 +316,18 @@ def pick_random_group(seed: str = "") -> str:
 
 
 def resolve_group(
-    title: str, topic: str, association: str = "", seed: str = ""
+    title: str,
+    topic: str,
+    association: str = "",
+    seed: str = "",
+    body: str = "",
 ) -> str:
     """Pick a group. Unknown explicit topics fall back to celebration."""
     chosen = normalize_topic(topic)
     if chosen == "auto":
         return pick_random_group(seed)
     if chosen == "title":
-        return pick_from_title(title, association)
+        return pick_from_title(title, association, body)
     if not chosen:
         print(
             f"unknown topic {topic!r}; allowed: {allowed_topics()}",
@@ -311,7 +359,7 @@ BUNDLED_GIFS = {
     "magic": ("wand.gif", "sparkles.gif"),
     "coffee": ("mug.gif", "night.gif"),
     "robot": ("wave.gif", "dance.gif"),
-    "comic": ("burst.gif", "pop.gif"),
+    "comic": ("burst.gif", "pop.gif", "alt.gif"),
     "sunny": ("sun.gif", "rainbow.gif"),
     "game": ("levelup.gif", "combo.gif"),
     "sticker": ("star.gif", "thumb.gif"),
@@ -378,6 +426,87 @@ def bundled_url(action_repo: str, action_ref: str, group: str, name: str) -> str
     )
 
 
+_IMAGE_SUFFIXES = (".gif", ".webp", ".png")
+_GIFS_PATH = re.compile(r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
+
+
+def gifs_path_ok(path: str) -> bool:
+    raw = (path or "").strip().strip("/")
+    if not raw or ".." in raw.split("/"):
+        return False
+    return bool(_GIFS_PATH.fullmatch(raw))
+
+
+def is_safe_gif_url(url: str) -> bool:
+    raw = (url or "").strip()
+    if not raw or not is_grated(raw):
+        return False
+    parsed = urllib.parse.urlparse(raw)
+    if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
+        return False
+    host = parsed.hostname or ""
+    if host in {"localhost", "127.0.0.1", "::1"} or host.endswith(".localhost"):
+        return False
+    path = (parsed.path or "").lower()
+    return any(path.endswith(suffix) for suffix in _IMAGE_SUFFIXES)
+
+
+def parse_custom_gifs(raw: str) -> list[str]:
+    found: list[str] = []
+    seen: set[str] = set()
+    for part in re.split(r"[\s,]+", raw or ""):
+        url = part.strip()
+        if not url or url in seen:
+            continue
+        if not is_safe_gif_url(url):
+            print(f"custom gif skipped: {url}", file=sys.stderr)
+            continue
+        seen.add(url)
+        found.append(url)
+    return found
+
+
+def pick_custom_gif(urls: list[str], seed: str) -> str:
+    if not urls:
+        return ""
+    return urls[random.Random(seed).randrange(len(urls))]
+
+
+def list_repo_gif_urls(token: str, repo: str, path: str, ref: str = "") -> list[str]:
+    """List image files in a folder on this repository. No pull-request head."""
+    folder = (path or "").strip().strip("/")
+    if not token or not repo or not gifs_path_ok(folder):
+        return []
+    api = (
+        f"https://api.github.com/repos/{repo}/contents/"
+        f"{urllib.parse.quote(folder)}"
+    )
+    if (ref or "").strip():
+        api += f"?ref={urllib.parse.quote((ref or '').strip())}"
+    try:
+        data = _http_json(api, token, headers=_github_headers(token))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+        print(f"gifs-path skipped: {exc}", file=sys.stderr)
+        return []
+    if not isinstance(data, list):
+        return []
+    urls: list[str] = []
+    seen: set[str] = set()
+    for item in data:
+        if not isinstance(item, dict) or item.get("type") != "file":
+            continue
+        name = str(item.get("name") or "")
+        low = name.lower()
+        if not any(low.endswith(suffix) for suffix in _IMAGE_SUFFIXES):
+            continue
+        raw = str(item.get("download_url") or "").strip()
+        if raw in seen or not is_safe_gif_url(raw):
+            continue
+        seen.add(raw)
+        urls.append(raw)
+    return urls
+
+
 def giphy_url(key: str, tag: str, rating: str) -> str:
     if not key:
         return ""
@@ -402,13 +531,134 @@ def giphy_url(key: str, tag: str, rating: str) -> str:
     )
 
 
-def comment_body(message: str, author: str, tag: str, gif: str) -> str:
-    text = (message or "Merged — thank you @{author}.").replace("{author}", author)
+CHEER_MARKER = "<!-- merge-cheer -->"
+CHEER_MOMENTS = frozenset({"merge", "closed", "changes"})
+SKIP_LABELS = frozenset({"no-cheer", "skip-cheer"})
+_COAUTHOR_LINE = re.compile(r"(?im)^[ \t]*co-authored-by:[ \t]+(.+)$")
+_GITHUB_NOREPLY = re.compile(
+    r"(?:(?P<id>\d+)\+)?(?P<login>[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)"
+    r"@users\.noreply\.github\.com$",
+    re.I,
+)
+# The pull request's author writes every Co-authored-by line, so each one is a
+# mention they can make the bot post. A few is thanks; more is spam.
+MAX_COAUTHORS = 5
+GITHUB_MODELS_URL = "https://models.github.ai/inference"
+AZURE_MODELS_URL = "https://models.inference.ai.azure.com"
+_UNSAFE = (
+    "nsfw",
+    "porn",
+    "sex",
+    "nude",
+    "xxx",
+    "kill yourself",
+    "kys",
+    "suicide",
+    "slur",
+)
+
+
+FIRST_TIMER_LINE = "First contribution — welcome."
+FIRST_TIMER_LINES = {
+    "en": FIRST_TIMER_LINE,
+    "es": "Primera contribución — te damos la bienvenida.",
+    "de": "Erster Beitrag — willkommen.",
+    "fr": "Première contribution — bienvenue.",
+    "pt": "Primeira contribuição — damos as boas-vindas.",
+    "uk": "Перший внесок — ласкаво просимо.",
+    "it": "Prima contribuzione — ti diamo il benvenuto.",
+    "be": "Першы ўклад — запрашаем.",
+    "ja": "初めてのコントリビューション — ようこそ。",
+}
+
+
+def first_timer_line(locale: str = "") -> str:
+    return FIRST_TIMER_LINES.get(normalize_locale(locale)) or FIRST_TIMER_LINE
+
+
+def ensure_mention(text: str, login: str) -> str:
+    """GitHub only notifies when the comment contains `@login`."""
+    who = (login or "").lstrip("@")
+    if not who:
+        return text
+    if re.search(r"@" + re.escape(who) + r"\b", text, flags=re.I):
+        return text
+    tagged, n = re.subn(
+        r"(?<!@)\b" + re.escape(who) + r"\b",
+        f"@{who}",
+        text,
+        count=1,
+        flags=re.I,
+    )
+    if n:
+        return tagged
     if not text.endswith("\n"):
         text += "\n"
-    if gif:
-        text += f"\n![{tag}]({gif})\n"
+    return f"{text}@{who}\n"
+
+
+def cheer_marker(moment: str = "merge") -> str:
+    """HTML comment that marks this moment so a later moment can still post."""
+    name = (moment or "merge").strip().lower()
+    if name not in CHEER_MOMENTS:
+        name = "merge"
+    return f"<!-- merge-cheer:{name} -->"
+
+
+NOTE_MAX = 280
+
+
+def clean_note(raw: str) -> str:
+    """Optional extra line (Discord, docs). G-rated, short, or empty."""
+    text = re.sub(r"\s+", " ", (raw or "").strip())
+    if not text:
+        return ""
+    if not is_grated(text):
+        print("note skipped: unsafe", file=sys.stderr)
+        return ""
+    if len(text) > NOTE_MAX:
+        text = text[:NOTE_MAX].rstrip()
     return text
+
+
+def comment_body(
+    message: str,
+    author: str,
+    tag: str,
+    gif: str,
+    authors: str = "",
+    association: str = "",
+    locale: str = "",
+    moment: str = "merge",
+    note: str = "",
+) -> str:
+    who = (author or "").lstrip("@")
+    named = authors or (f"@{who}" if who else "")
+    text = message or "Merged — thank you @{author}."
+    text = text.replace("{authors}", named)
+    if "@{author}" in text:
+        text = text.replace("{author}", named.lstrip("@") if named else who)
+    else:
+        text = text.replace("{author}", named or who)
+    if not text.endswith("\n"):
+        text += "\n"
+    if (association or "").upper() in FIRST_TIMERS:
+        line = first_timer_line(locale)
+        already = (
+            line.lower() in text.lower()
+            or FIRST_TIMER_LINE.lower() in text.lower()
+        )
+        if not already:
+            text += f"{line}\n"
+    extra = clean_note(note)
+    if extra:
+        text += f"{extra}\n"
+    text = ensure_mention(text, who)
+    if gif:
+        src = html.escape(gif, quote=True)
+        alt = html.escape(tag or "celebration", quote=True)
+        text += f'\n<img src="{src}" alt="{alt}" width="{GIF_DISPLAY_WIDTH}" />\n'
+    return f"{cheer_marker(moment)}\n{text}"
 
 
 DEFAULT_MESSAGES = {
@@ -416,6 +666,67 @@ DEFAULT_MESSAGES = {
     "closed": "Closed — thank you for the work @{author}.",
     "changes": "A bit more work — you have this @{author}.",
 }
+
+# Static catalog for `locale`. Unknown codes fall back to English.
+# A pinned message / closed-message / changes-message still wins.
+LOCALES = {
+    "en": DEFAULT_MESSAGES,
+    "es": {
+        "merge": "Fusionado — gracias @{author}.",
+        "closed": "Cerrado — gracias por el trabajo @{author}.",
+        "changes": "Un poco más de trabajo — tú puedes @{author}.",
+    },
+    "de": {
+        "merge": "Gemerged — danke @{author}.",
+        "closed": "Geschlossen — danke für die Arbeit @{author}.",
+        "changes": "Noch etwas Arbeit — du schaffst das @{author}.",
+    },
+    "fr": {
+        "merge": "Fusionné — merci @{author}.",
+        "closed": "Fermé — merci pour le travail @{author}.",
+        "changes": "Encore un peu de travail — tu vas y arriver @{author}.",
+    },
+    "pt": {
+        "merge": "Mesclado — obrigado @{author}.",
+        "closed": "Fechado — obrigado pelo trabalho @{author}.",
+        "changes": "Um pouco mais de trabalho — você consegue @{author}.",
+    },
+    "uk": {
+        "merge": "Змерджено — дякую @{author}.",
+        "closed": "Закрито — дякую за роботу @{author}.",
+        "changes": "Ще трохи роботи — у тебе вийде @{author}.",
+    },
+    "it": {
+        "merge": "Unito — grazie @{author}.",
+        "closed": "Chiuso — grazie per il lavoro @{author}.",
+        "changes": "Ancora un po' di lavoro — ce la fai @{author}.",
+    },
+    "be": {
+        "merge": "Змерджана — дзякуй @{author}.",
+        "closed": "Закрыта — дзякуй за працу @{author}.",
+        "changes": "Яшчэ крыху працы — у цябе атрымаецца @{author}.",
+    },
+    "ja": {
+        "merge": "マージしました — ありがとう @{author}。",
+        "closed": "クローズしました — 作業をありがとう @{author}。",
+        "changes": "もう少し作業を — いける @{author}。",
+    },
+}
+
+
+def normalize_locale(raw: str) -> str:
+    code = (raw or "").strip().lower().replace("_", "-")
+    if not code:
+        return "en"
+    return code.split("-", 1)[0]
+
+
+def localize_message(moment: str, message: str, locale: str) -> str:
+    text = (message or "").strip()
+    if text != DEFAULT_MESSAGES.get(moment, ""):
+        return message
+    pack = LOCALES.get(normalize_locale(locale)) or LOCALES["en"]
+    return pack.get(moment) or DEFAULT_MESSAGES.get(moment, text)
 
 DEFAULT_TOPICS = {
     "merge": "auto",
@@ -488,9 +799,130 @@ def detect_host() -> str:
 SKIP_MARKERS = ("no-cheer", "[skip cheer]")
 
 
-def should_skip(title: str) -> bool:
+def parse_labels(raw: str) -> list[str]:
+    names: list[str] = []
+    for part in (raw or "").replace("\n", ",").split(","):
+        name = part.strip()
+        if name:
+            names.append(name)
+    return names
+
+
+def should_skip(title: str, labels: str = "") -> bool:
     low = (title or "").lower()
-    return any(marker in low for marker in SKIP_MARKERS)
+    if any(marker in low for marker in SKIP_MARKERS):
+        return True
+    return any(name.lower() in SKIP_LABELS for name in parse_labels(labels))
+
+
+def parse_coauthors(*texts: str) -> list[str]:
+    found: list[str] = []
+    seen: set[str] = set()
+    blob = "\n".join(text or "" for text in texts)
+    for match in _COAUTHOR_LINE.finditer(blob):
+        login = _coauthor_login(match.group(1))
+        key = login.lower()
+        if not login or key in seen or is_bot_author(login):
+            continue
+        seen.add(key)
+        found.append(login)
+        if len(found) == MAX_COAUTHORS:
+            break
+    return found
+
+
+def _coauthor_login(rest: str) -> str:
+    raw = (rest or "").strip()
+    name_part = raw.split("<", 1)[0].strip()
+    if is_bot_author(name_part):
+        return ""
+    # Only Git's trailer form with a GitHub noreply address names a login, the
+    # form GitHub itself writes. A bare login could mention anyone at all.
+    email_match = re.search(r"<([^>]+)>", raw)
+    if not email_match:
+        return ""
+    noreply = _GITHUB_NOREPLY.search(email_match.group(1).strip())
+    return noreply.group("login") if noreply else ""
+
+
+def format_authors(logins: list[str]) -> str:
+    tagged = [f"@{login.lstrip('@')}" for login in logins if login.strip()]
+    if not tagged:
+        return ""
+    if len(tagged) == 1:
+        return tagged[0]
+    if len(tagged) == 2:
+        return f"{tagged[0]} and {tagged[1]}"
+    return f"{', '.join(tagged[:-1])}, and {tagged[-1]}"
+
+
+def collect_authors(
+    author: str, *texts: str, extras: list[str] | None = None
+) -> list[str]:
+    people: list[str] = []
+    seen: set[str] = set()
+
+    def add(login: str) -> None:
+        name = (login or "").strip().lstrip("@")
+        key = name.lower()
+        if not name or key in seen or is_bot_author(name):
+            return
+        seen.add(key)
+        people.append(name)
+
+    add(author)
+    for login in parse_coauthors(*texts):
+        add(login)
+    for login in extras or []:
+        add(login)
+    return people
+
+
+def people_to_credit(
+    moment: str, author: str, pr_body: str, commit_text: str, reviewers: list[str]
+) -> list[str]:
+    """Co-authors and reviewers are thanked on merge only. A closed or
+    changes-requested pull request is its author's alone, so its text must not
+    let them make the bot mention anyone else."""
+    if moment != "merge":
+        return collect_authors(author)
+    return collect_authors(author, pr_body, commit_text, extras=reviewers)
+
+
+def already_cheered(comments: object, moment: str = "merge") -> bool:
+    """True when this moment already has a cheer.
+
+    Legacy comments used ``<!-- merge-cheer -->`` with no moment. Treat those
+    as a merge cheer so a re-run does not post a second merge GIF. A
+    changes or closed cheer uses ``<!-- merge-cheer:changes -->`` /
+    ``<!-- merge-cheer:closed -->`` and does not block merge.
+    """
+    if not isinstance(comments, list):
+        return False
+    name = (moment or "merge").strip().lower()
+    if name not in CHEER_MOMENTS:
+        name = "merge"
+    wanted = cheer_marker(name)
+    for item in comments:
+        if not isinstance(item, dict):
+            continue
+        body = str(item.get("body") or "")
+        if wanted in body:
+            return True
+        if (
+            name == "merge"
+            and CHEER_MARKER in body
+            and "<!-- merge-cheer:" not in body
+        ):
+            return True
+    return False
+
+
+def is_grated(text: str) -> bool:
+    low = (text or "").lower()
+    if not low.strip():
+        return False
+    return not any(word in low for word in _UNSAFE)
 
 
 def is_bot_author(author: str, kind: str = "") -> bool:
@@ -532,6 +964,15 @@ def _http_json(
         return json.loads(raw)
 
 
+def _github_headers(token: str) -> dict[str, str]:
+    return {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "User-Agent": "merge-cheer",
+        "Content-Type": "application/json",
+    }
+
+
 def post_github_comment(token: str, repo: str, number: str, body: str) -> None:
     if not token or not repo or not number:
         raise SystemExit("GITHUB_TOKEN, GITHUB_REPOSITORY, and PR_NUMBER are required")
@@ -540,13 +981,440 @@ def post_github_comment(token: str, repo: str, number: str, body: str) -> None:
         token,
         method="POST",
         payload={"body": body},
-        headers={
-            "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {token}",
-            "User-Agent": "merge-cheer",
-            "Content-Type": "application/json",
-        },
+        headers=_github_headers(token),
     )
+
+
+def list_github_comments(token: str, repo: str, number: str) -> list:
+    if not token or not repo or not number:
+        return []
+    try:
+        data = _http_json(
+            f"https://api.github.com/repos/{repo}/issues/{number}/comments?per_page=100",
+            token,
+            headers=_github_headers(token),
+        )
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+        print(f"comments lookup skipped: {exc}", file=sys.stderr)
+        return []
+    return data if isinstance(data, list) else []
+
+
+def list_pr_commit_messages(token: str, repo: str, number: str) -> list[str]:
+    if not token or not repo or not number:
+        return []
+    try:
+        data = _http_json(
+            f"https://api.github.com/repos/{repo}/pulls/{number}/commits?per_page=100",
+            token,
+            headers=_github_headers(token),
+        )
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+        print(f"commits lookup skipped: {exc}", file=sys.stderr)
+        return []
+    if not isinstance(data, list):
+        return []
+    messages: list[str] = []
+    for row in data:
+        if not isinstance(row, dict):
+            continue
+        commit = row.get("commit")
+        if isinstance(commit, dict) and commit.get("message"):
+            messages.append(str(commit["message"]))
+    return messages
+
+
+def list_pr_reviewers(token: str, repo: str, number: str) -> list[str]:
+    if not token or not repo or not number:
+        return []
+    try:
+        data = _http_json(
+            f"https://api.github.com/repos/{repo}/pulls/{number}/reviews?per_page=100",
+            token,
+            headers=_github_headers(token),
+        )
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+        print(f"reviews lookup skipped: {exc}", file=sys.stderr)
+        return []
+    if not isinstance(data, list):
+        return []
+    people: list[str] = []
+    seen: set[str] = set()
+    for row in data:
+        if not isinstance(row, dict):
+            continue
+        user = row.get("user")
+        if not isinstance(user, dict):
+            continue
+        login = str(user.get("login") or "").strip()
+        kind = str(user.get("type") or "")
+        key = login.lower()
+        if not login or key in seen or is_bot_author(login, kind):
+            continue
+        seen.add(key)
+        people.append(login)
+    return people
+
+
+def list_pr_files(token: str, repo: str, number: str) -> list[str]:
+    """File names on the pull request. No patch. No pull-request head."""
+    if not token or not repo or not number:
+        return []
+    try:
+        data = _http_json(
+            f"https://api.github.com/repos/{repo}/pulls/{number}/files?per_page=100",
+            token,
+            headers=_github_headers(token),
+        )
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+        print(f"files lookup skipped: {exc}", file=sys.stderr)
+        return []
+    if not isinstance(data, list):
+        return []
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("filename") or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
+
+
+def model_settings() -> tuple[str, str, str] | None:
+    """Return (api_key, model, base_url) when a model call is allowed."""
+    name = os.environ.get("MODEL", "").strip()
+    key = os.environ.get("MODEL_API_KEY", "").strip()
+    base = os.environ.get("MODEL_BASE_URL", "").strip().rstrip("/")
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    low = name.lower()
+    githubish = (
+        "models.github.ai" in base
+        or "models.inference.ai.azure.com" in base
+        or low in {"github", "github-models"}
+    )
+    if githubish:
+        if not (key or token):
+            return None
+        model = name if name and low not in {"github", "github-models"} else "openai/gpt-4o-mini"
+        return (key or token, model, base or GITHUB_MODELS_URL)
+    if not key:
+        return None
+    return (key, name or "gpt-4o-mini", base or "https://api.openai.com/v1")
+
+
+_GENERIC_CHEER = re.compile(
+    r"^(?:(?:merged\s*[—\-]?\s*)?thank(?:s| you)"
+    r"(?:\s+for(?:\s+the)?\s+(?:work|pr|help))?|thanks?)"
+    r"[\s.,!]*"
+    r"(?:\{authors?\}|@\{author\}|@\w+)?"
+    r"[\s.,!]*$",
+    re.I,
+)
+_TITLE_STOP = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "the",
+        "for",
+        "from",
+        "with",
+        "this",
+        "that",
+        "into",
+        "onto",
+        "chore",
+        "docs",
+        "doc",
+        "feat",
+        "fix",
+        "ci",
+        "test",
+        "tests",
+        "merge",
+        "merged",
+        "pr",
+        "pull",
+        "request",
+        "add",
+        "added",
+        "update",
+        "updated",
+        "bump",
+    }
+)
+
+
+def title_tokens(title: str) -> set[str]:
+    words = re.findall(r"[a-z0-9]{4,}", (title or "").lower())
+    return {word for word in words if word not in _TITLE_STOP}
+
+
+def title_hint(title: str) -> str:
+    """First specific word from the title for the stdlib thank-you."""
+    for word in re.findall(r"[a-z0-9]{4,}", (title or "").lower()):
+        if word in _TITLE_STOP:
+            continue
+        if not is_grated(word):
+            continue
+        return word
+    return ""
+
+
+def file_hint(files: list[str] | None) -> str:
+    """First specific word from pull request file names. Basename first."""
+    for raw in files or []:
+        name = (raw or "").strip().replace("\\", "/")
+        if not name:
+            continue
+        base = name.rsplit("/", 1)[-1]
+        stem = base.rsplit(".", 1)[0] if "." in base else base
+        for part in (
+            stem.replace("-", " ").replace("_", " "),
+            name.replace("/", " ").replace(".", " "),
+        ):
+            hint = title_hint(part)
+            if hint:
+                return hint
+    return ""
+
+
+def work_hint(title: str, files: list[str] | None = None) -> str:
+    """Prefer a file name when one exists; otherwise the title word."""
+    return file_hint(files) or title_hint(title)
+
+
+def with_title_hint(
+    message: str,
+    title: str,
+    locale: str = "en",
+    moment: str = "merge",
+    files: list[str] | None = None,
+) -> str:
+    """Put one work word in the default thank-you. Pinned copy is unchanged."""
+    text = message or ""
+    hint = work_hint(title, files)
+    if not hint or hint in text.lower() or " — " not in text:
+        return text
+    loc = normalize_locale(locale)
+    if loc == "en" and moment == "changes":
+        insert = f" on {hint} — "
+    elif loc == "en":
+        insert = f" the {hint} — "
+    elif loc == "ja":
+        insert = f"（{hint}） — "
+    else:
+        insert = f" {hint} — "
+    return text.replace(" — ", insert, 1)
+
+
+def cheer_is_specific(
+    title: str, message: str, files: list[str] | None = None
+) -> bool:
+    line = (message or "").strip()
+    if not is_grated(line):
+        return False
+    if any(line.lower() == default.lower() for default in DEFAULT_MESSAGES.values()):
+        return False
+    stripped = re.sub(r"\{authors?\}|@\{author\}", "", line).strip()
+    if _GENERIC_CHEER.match(line) or _GENERIC_CHEER.match(stripped):
+        return False
+    tokens = title_tokens(title)
+    for name in files or []:
+        tokens.update(title_tokens(name.replace("/", " ").replace(".", " ")))
+        tokens.update(title_tokens(Path(name).stem.replace("-", " ").replace("_", " ")))
+    if not tokens:
+        return True
+    low = line.lower()
+    return any(token in low for token in tokens)
+
+
+MODEL_LINE_MAX = 200
+# A model reads the pull request, which its author wrote, so its reply can carry
+# their instructions. Links, markup and extra mentions are refused outright.
+_MODEL_LINE_UNSAFE = re.compile(
+    r"https?://|www\.|\]\(|<[^>]*>|[\r\n]|@(?!\{author\})[A-Za-z0-9]", re.I
+)
+
+
+def model_line_ok(title: str, line: str, files: list[str] | None = None) -> bool:
+    """A model reply is used only as one short plain line about this change."""
+    text = (line or "").strip()
+    if not text or len(text) > MODEL_LINE_MAX or _MODEL_LINE_UNSAFE.search(line or ""):
+        return False
+    return cheer_is_specific(title, text, files)
+
+
+def _parse_model_payload(raw: str) -> str | None:
+    text = (raw or "").strip()
+    if not text:
+        return None
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", text, re.S)
+        if not match:
+            return None
+        try:
+            data = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(data, dict):
+        return None
+    message = str(data.get("message") or "").strip()
+    return message or None
+
+
+# The whole model step (request and reply parsing) gets this long. The socket
+# timeout in _http_json is per read, so a slow drip could last far longer.
+MODEL_DEADLINE_SECONDS = 20.0
+_MODEL_KEY_OK = re.compile(r"[\x21-\x7e]+")
+
+
+def _model_skip_reason(exc: BaseException) -> str:
+    """Why the model was skipped, without the key, headers, or reply text."""
+    if isinstance(exc, urllib.error.HTTPError):
+        return f"HTTP {exc.code}"
+    if isinstance(exc, (TimeoutError, urllib.error.URLError, json.JSONDecodeError)):
+        return str(exc)
+    return type(exc).__name__
+
+
+def _warn_model_skipped(reason: str) -> None:
+    print(f"model skipped: {reason}", file=sys.stderr)
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print(
+            "::warning title=Merge Cheer::model unavailable "
+            f"({reason}); posted the default thank-you"
+        )
+
+
+def ask_model(
+    moment: str,
+    title: str,
+    body: str,
+    author: str,
+    authors: str,
+    files: list[str] | None = None,
+) -> str | None:
+    """The model line, or None. Never raises and never runs past the deadline."""
+    result: dict[str, object] = {}
+
+    def run() -> None:
+        try:
+            result["line"] = _ask_model(moment, title, body, author, authors, files)
+        except Exception as exc:  # a model must never fail the job
+            result["error"] = exc
+
+    worker = threading.Thread(target=run, name="merge-cheer-model", daemon=True)
+    worker.start()
+    worker.join(MODEL_DEADLINE_SECONDS)
+    if worker.is_alive():
+        _warn_model_skipped(f"no reply within {MODEL_DEADLINE_SECONDS:g}s")
+        return None
+    if "error" in result:
+        _warn_model_skipped(_model_skip_reason(result["error"]))  # type: ignore[arg-type]
+        return None
+    line = result.get("line")
+    return line if isinstance(line, str) else None
+
+
+def _ask_model(
+    moment: str,
+    title: str,
+    body: str,
+    author: str,
+    authors: str,
+    files: list[str] | None = None,
+) -> str | None:
+    cfg = model_settings()
+    if not cfg:
+        return None
+    key, model, base = cfg
+    parsed_base = urllib.parse.urlparse(base)
+    if parsed_base.scheme not in {"http", "https"} or not parsed_base.netloc:
+        _warn_model_skipped("model-base-url must be an http:// or https:// URL")
+        return None
+    if not _MODEL_KEY_OK.fullmatch(key):
+        _warn_model_skipped("model-api-key has spaces or characters a header cannot carry")
+        return None
+    excerpt = (body or "")[:200]
+    repo = os.environ.get("GITHUB_REPOSITORY", "").strip()
+    names = [name for name in (files or []) if name][:20]
+    system = (
+        "You write one G-rated pull-request thank-you that is about "
+        "what just landed. "
+        'Reply with JSON only: {"message": "<one short line>"}. '
+        "The message must mention something from the title or from "
+        "the file names we sent. "
+        "Do not invent file names or people. "
+        "Do not write a generic thanks. "
+        "Use @{author} or {authors} so GitHub notifies them. "
+        "No slurs, no adult content, no violence."
+    )
+    user = json.dumps(
+        {
+            "moment": moment,
+            "repository": repo,
+            "title": title,
+            "body": excerpt,
+            "author": author,
+            "authors": authors,
+            "files": names,
+        }
+    )
+    url = f"{base.rstrip('/')}/chat/completions"
+    try:
+        data = _http_json(
+            url,
+            key,
+            method="POST",
+            payload={
+                "model": model,
+                "temperature": 0.4,
+                "max_tokens": 60,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+            },
+        )
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+        print(f"model skipped: {exc}", file=sys.stderr)
+        return None
+    content = ""
+    if isinstance(data, dict):
+        choices = data.get("choices") or []
+        if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+            message = (choices[0].get("message") or {}) if isinstance(
+                choices[0].get("message"), dict
+            ) else {}
+            content = str(message.get("content") or "")
+    line = _parse_model_payload(content)
+    if not line or not model_line_ok(title, line, names):
+        print("model skipped: generic or unsafe", file=sys.stderr)
+        return None
+    print(f"model: message={line}", file=sys.stderr)
+    return line
+
+
+def topic_is_default(moment: str, topic: str) -> bool:
+    chosen = normalize_topic(topic)
+    if chosen in {"", "auto"}:
+        return True
+    default = normalize_topic(DEFAULT_TOPICS.get(moment, "auto"))
+    return moment != "merge" and chosen == default
+
+
+def message_is_default(moment: str, message: str) -> bool:
+    return (message or "").strip() == DEFAULT_MESSAGES.get(moment, "")
 
 
 def gitlab_headers(token: str) -> dict[str, str]:
@@ -585,6 +1453,71 @@ def post_gitlab_note(token: str, project: str, iid: str, body: str) -> None:
     )
 
 
+def list_gitlab_notes(token: str, project: str, iid: str) -> list:
+    if not token or not project or not iid:
+        return []
+    encoded = urllib.parse.quote(str(project), safe="")
+    try:
+        data = _http_json(
+            f"{gitlab_api_root()}/projects/{encoded}/merge_requests/{iid}/notes?per_page=100",
+            token,
+            headers=gitlab_headers(token),
+        )
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+        print(f"notes lookup skipped: {exc}", file=sys.stderr)
+        return []
+    if not isinstance(data, list):
+        return []
+    notes = []
+    for item in data:
+        if isinstance(item, dict):
+            notes.append({"body": str(item.get("body") or "")})
+    return notes
+
+
+def _requested_changes(entries: object) -> bool:
+    if not isinstance(entries, list):
+        return False
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        state = str(
+            item.get("state") or item.get("review_state") or ""
+        ).lower().replace(" ", "_")
+        if state not in {"changes_requested", "requested_changes"}:
+            continue
+        user = item.get("user") if isinstance(item.get("user"), dict) else item
+        login = ""
+        kind = ""
+        if isinstance(user, dict):
+            login = str(
+                user.get("username")
+                or user.get("login")
+                or user.get("nickname")
+                or ""
+            )
+            kind = str(user.get("type") or "")
+        if login and is_bot_author(login, kind):
+            continue
+        return True
+    return False
+
+
+def _gitlab_reviewers(token: str, encoded: str, iid: str) -> list:
+    if not token or not encoded or not iid:
+        return []
+    try:
+        data = _http_json(
+            f"{gitlab_api_root()}/projects/{encoded}/merge_requests/{iid}/reviewers",
+            token,
+            headers=gitlab_headers(token),
+        )
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+        print(f"reviewers lookup skipped: {exc}", file=sys.stderr)
+        return []
+    return data if isinstance(data, list) else []
+
+
 def lookup_gitlab_mr(token: str) -> dict[str, str]:
     project = os.environ.get("CI_PROJECT_ID", "").strip()
     iid = os.environ.get("CI_MERGE_REQUEST_IID", "").strip()
@@ -611,17 +1544,35 @@ def lookup_gitlab_mr(token: str) -> dict[str, str]:
         return {}
     if not isinstance(data, dict) or not data:
         return {}
-    if str(data.get("state") or "") not in {"merged", ""}:
-        if iid and str(data.get("state") or "") != "merged":
+    state = str(data.get("state") or "").lower()
+    review = ""
+    if state == "opened" or (iid and not state):
+        people = data.get("reviewers")
+        number = str(data.get("iid") or iid)
+        if not _requested_changes(people):
+            people = _gitlab_reviewers(token, encoded, number)
+        if _requested_changes(people):
+            review = "changes_requested"
+        elif state == "opened":
             return {}
+    elif iid and state and state not in {"merged", "closed"}:
+        return {}
     user = data.get("author") or {}
+    merged = ""
+    if state == "merged":
+        merged = "true"
+    elif state == "closed":
+        merged = "false"
     return {
         "number": str(data.get("iid") or iid),
         "title": str(data.get("title") or ""),
         "author": str(user.get("username") or ""),
+        "body": str(data.get("description") or ""),
         "association": "FIRST_TIME_CONTRIBUTOR"
         if data.get("first_contribution")
         else "",
+        "merged": merged,
+        "review": review,
     }
 
 
@@ -636,6 +1587,30 @@ def post_bitbucket_comment(token: str, workspace: str, slug: str, number: str, b
         method="POST",
         payload={"content": {"raw": body}},
     )
+
+
+def list_bitbucket_comments(token: str, workspace: str, slug: str, number: str) -> list:
+    if not token or not workspace or not slug or not number:
+        return []
+    try:
+        data = _http_json(
+            f"https://api.bitbucket.org/2.0/repositories/{workspace}/{slug}/pullrequests/{number}/comments?pagelen=100",
+            token,
+        )
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+        print(f"comments lookup skipped: {exc}", file=sys.stderr)
+        return []
+    values = data.get("values") if isinstance(data, dict) else data
+    if not isinstance(values, list):
+        return []
+    comments = []
+    for item in values:
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content") or {}
+        raw = content.get("raw") if isinstance(content, dict) else ""
+        comments.append({"body": str(raw or "")})
+    return comments
 
 
 def lookup_bitbucket_pr(token: str) -> dict[str, str]:
@@ -663,14 +1638,28 @@ def lookup_bitbucket_pr(token: str) -> dict[str, str]:
     if not isinstance(data, dict) or not data:
         return {}
     state = str(data.get("state") or "").upper()
-    if state and state != "MERGED":
+    review = ""
+    if state == "OPEN":
+        if _requested_changes(data.get("participants")):
+            review = "changes_requested"
+        else:
+            return {}
+    elif state and state not in {"MERGED", "DECLINED", "SUPERSEDED"}:
         return {}
     author = ((data.get("author") or {}).get("nickname") or "")
+    merged = ""
+    if state == "MERGED":
+        merged = "true"
+    elif state in {"DECLINED", "SUPERSEDED"}:
+        merged = "false"
     return {
         "number": str(data.get("id") or number),
         "title": str(data.get("title") or ""),
         "author": str(author),
+        "body": str(data.get("description") or ""),
         "association": "",
+        "merged": merged,
+        "review": review,
     }
 
 
@@ -689,10 +1678,15 @@ def write_output(path: str, values: dict[str, str]) -> None:
 def main() -> int:
     host = detect_host()
     title = os.environ.get("PR_TITLE", "")
+    pr_body = os.environ.get("PR_BODY", "")
+    labels = os.environ.get("PR_LABELS", "")
     topic = os.environ.get("TOPIC", "auto")
     association = os.environ.get("PR_AUTHOR_ASSOCIATION", "")
     author = os.environ.get("PR_AUTHOR", "").strip()
     number = os.environ.get("PR_NUMBER", "").strip()
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    repo = os.environ.get("GITHUB_REPOSITORY", "").strip()
+    found: dict[str, str] = {}
     if host == "gitlab" and not number:
         found = lookup_gitlab_mr(
             (
@@ -705,6 +1699,7 @@ def main() -> int:
         author = author or found.get("author", "")
         number = found.get("number", "")
         association = association or found.get("association", "")
+        pr_body = pr_body or found.get("body", "")
     if host == "bitbucket" and not number:
         found = lookup_bitbucket_pr(
             os.environ.get("BITBUCKET_ACCESS_TOKEN", "").strip()
@@ -712,10 +1707,13 @@ def main() -> int:
         title = title or found.get("title", "")
         author = author or found.get("author", "")
         number = found.get("number", "")
+        pr_body = pr_body or found.get("body", "")
+    merged = os.environ.get("PR_MERGED", "") or found.get("merged", "")
+    review = os.environ.get("REVIEW_STATE", "") or found.get("review", "")
     moment = detect_moment(
         os.environ.get("EVENT_NAME", ""),
-        os.environ.get("PR_MERGED", ""),
-        os.environ.get("REVIEW_STATE", ""),
+        merged,
+        review,
     )
     if moment is None:
         print("skip: not a cheer moment")
@@ -732,8 +1730,31 @@ def main() -> int:
     if host in {"gitlab", "bitbucket"} and not number:
         print("skip: no merged merge request")
         return 0
-    if should_skip(title):
+    if should_skip(title, labels):
         print("skip cheer requested")
+        return 0
+    existing = []
+    if host == "github":
+        existing = list_github_comments(token, repo, number)
+    elif host == "gitlab":
+        existing = list_gitlab_notes(
+            (
+                os.environ.get("GITLAB_TOKEN")
+                or os.environ.get("CI_JOB_TOKEN")
+                or ""
+            ).strip(),
+            os.environ.get("CI_PROJECT_ID", "").strip(),
+            number,
+        )
+    elif host == "bitbucket":
+        existing = list_bitbucket_comments(
+            os.environ.get("BITBUCKET_ACCESS_TOKEN", "").strip(),
+            os.environ.get("BITBUCKET_WORKSPACE", "").strip(),
+            os.environ.get("BITBUCKET_REPO_SLUG", "").strip(),
+            number,
+        )
+    if existing and already_cheered(existing, moment):
+        print("skip: already cheered")
         return 0
     topic = moment_topic(
         moment,
@@ -747,23 +1768,74 @@ def main() -> int:
         os.environ.get("CLOSED_MESSAGE", ""),
         os.environ.get("CHANGES_MESSAGE", ""),
     )
-    group = resolve_group(title, topic, association, number)
+    commit_text = ""
+    reviewers: list[str] = []
+    files: list[str] = []
+    if host == "github":
+        commit_text = "\n".join(list_pr_commit_messages(token, repo, number))
+        if moment == "merge":
+            reviewers = list_pr_reviewers(token, repo, number)
+        if message_is_default(moment, message):
+            files = list_pr_files(token, repo, number)
+    logins = people_to_credit(moment, author, pr_body, commit_text, reviewers)
+    authors = format_authors(logins)
+    group = resolve_group(title, topic, association, number, pr_body)
+    if message_is_default(moment, message):
+        hinted = ask_model(moment, title, pr_body, author, authors, files)
+        if hinted:
+            message = hinted
+        else:
+            message = localize_message(
+                moment, message, os.environ.get("LOCALE", "")
+            )
+            message = with_title_hint(
+                message,
+                title,
+                os.environ.get("LOCALE", ""),
+                moment,
+                files,
+            )
     root = action_root()
     group, name = choose_gif(root, group, number)
-    gif = giphy_url(
-        os.environ.get("GIPHY_API_KEY", "").strip(),
-        GIPHY_TAG[group],
-        os.environ.get("GIPHY_RATING", "g").strip() or "g",
-    )
+    gif = ""
+    if moment == "merge":
+        custom = parse_custom_gifs(os.environ.get("CUSTOM_GIFS", ""))
+        if not custom and host == "github":
+            custom = list_repo_gif_urls(
+                token,
+                repo,
+                os.environ.get("GIFS_PATH", ""),
+                os.environ.get("DEFAULT_BRANCH", ""),
+            )
+        if custom:
+            gif = pick_custom_gif(custom, number)
+            if gif:
+                print(f"custom gif: {gif}", file=sys.stderr)
     if not gif:
-        gif = bundled_url(
-            os.environ.get("ACTION_REPO", "").strip(),
-            os.environ.get("ACTION_REF", "main"),
-            group,
-            name,
+        gif = giphy_url(
+            os.environ.get("GIPHY_API_KEY", "").strip(),
+            GIPHY_TAG[group],
+            os.environ.get("GIPHY_RATING", "g").strip() or "g",
         )
+        if not gif:
+            gif = bundled_url(
+                os.environ.get("ACTION_REPO", "").strip(),
+                os.environ.get("ACTION_REF", "main"),
+                group,
+                name,
+            )
     label = LABEL[group]
-    body = comment_body(message, author, label, gif)
+    body = comment_body(
+        message,
+        author,
+        label,
+        gif,
+        authors,
+        association,
+        os.environ.get("LOCALE", ""),
+        moment,
+        os.environ.get("NOTE", ""),
+    )
     write_output(
         os.environ.get("GITHUB_OUTPUT", ""),
         {

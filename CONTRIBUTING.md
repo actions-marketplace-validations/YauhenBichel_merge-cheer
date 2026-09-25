@@ -35,26 +35,25 @@ Each GIF must stay under 180 KB. The test suite fails if one grows.
 
 ## What a good first change looks like
 
-Start at [`good first issue`](https://github.com/YauhenBichel/merge-cheer/labels/good%20first%20issue).
-[`help wanted`](https://github.com/YauhenBichel/merge-cheer/labels/help%20wanted) is the same list plus anything a bit larger.
+If [`good first issue`](https://github.com/YauhenBichel/merge-cheer/labels/good%20first%20issue)
+has an open issue, start there. The label is often empty — pick from
+the list below and [open an issue](https://github.com/YauhenBichel/merge-cheer/issues/new)
+first so two people do not take the same change.
 
-| Issue | What it is |
-| --- | --- |
-| [#3](https://github.com/YauhenBichel/merge-cheer/issues/3) | more title keywords for existing groups |
-| [#1](https://github.com/YauhenBichel/merge-cheer/issues/1) | a third GIF in one group folder |
-| [#5](https://github.com/YauhenBichel/merge-cheer/issues/5) | dogfood comment polish |
-| [#2](https://github.com/YauhenBichel/merge-cheer/issues/2) | localize the default thank-you |
-| [#4](https://github.com/YauhenBichel/merge-cheer/issues/4) | Marketplace listing screenshot |
+Locale, Marketplace screenshot, first-timer welcome, a third comic
+GIF, and the title-keyword / skip / co-author work already landed.
 
 A good first change is one of:
 
 - a title keyword that maps to an **existing** group, plus a test
 - another GIF in `gifs/<group>/` (under 180 KB, G-rated)
-- a clearer default comment or dogfood message
+- another `locale` in the static catalog (`en`, `es`, `de`, `fr`, `pt`, `uk`, `it`, `be`, `ja` are there)
 
 Groups today: `ship`, `fix`, `docs`, `tests`, `cleanup`,
 `celebration`, `welcome`, `party`, `space`, `magic`, `coffee`, `robot`,
-`comic`, `sunny`, `game`, `sticker`, `yeah`.
+`comic`, `sunny`, `game`, `sticker`, `yeah`, `devops`, `sre`, `qa`,
+`design`, `architecture`, `engineering`, `backend`, `frontend`, `java`,
+`python`, `cpp`, `golang`.
 
 Design questions go in [Discussions](https://github.com/YauhenBichel/merge-cheer/discussions), not a drive-by PR.
 
@@ -79,8 +78,8 @@ of your own repository.
 
 ## Reporting security issues
 
-Open a **public** GitHub issue. See [SECURITY.md](./SECURITY.md).
-Do not paste live keys.
+Use GitHub private vulnerability reporting. See [SECURITY.md](./SECURITY.md).
+Do not paste live keys. Do not open a public issue for a working exploit.
 
 ## Licence
 

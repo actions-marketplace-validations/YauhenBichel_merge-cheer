@@ -5,12 +5,19 @@ can still get a comment. That event has access to this repository's
 secrets. The Action therefore:
 
 - does not check out the pull request head
-- reads the title from an environment variable
+- reads the title, body, and labels from environment variables
 - only posts a comment
+- calls a model only when `model` / `model-api-key` is set; a failed
+  or unsafe reply falls back to the stdlib path
 
 ## Reporting a vulnerability
 
-Open a **public** GitHub issue on this repo. Label it `security` if you can.
+Use GitHub **private** vulnerability reporting:
+
+https://github.com/YauhenBichel/merge-cheer/security/advisories/new
+
+This Action is meant to run on `pull_request_target` with repository
+secrets in scope. Do not open a public issue for a working exploit.
 
 Include:
 
@@ -18,8 +25,12 @@ Include:
 - how to reproduce it
 - what an attacker could do with it
 
-Do **not** paste live API keys, tokens, or `.env` contents into the issue.
-Redact secrets and describe them instead.
+Do **not** paste live API keys, tokens, or `.env` contents. Redact
+secrets and describe them instead.
+
+Open a public issue only if the private form is unavailable, and only
+for a report that is not a working exploit. Label it `security` if you
+can.
 
 ## Scope
 

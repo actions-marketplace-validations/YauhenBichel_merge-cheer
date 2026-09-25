@@ -1,0 +1,22 @@
+# Same GIF as the zero-config job, plus one line about what merged.
+# Settings → Secrets → Actions → New repository secret:
+#   Name: OPENAI_API_KEY
+#   Value: your OpenAI (or OpenAI-compatible) key
+#
+# @v1.7.0 drops generic thanks.
+
+name: Celebrate merge
+on:
+  pull_request_target:
+    types: [closed]
+permissions:
+  pull-requests: write
+jobs:
+  celebrate:
+    if: github.event.pull_request.merged && github.event.pull_request.user.type != 'Bot'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: YauhenBichel/merge-cheer@v1.8.0
+        with:
+          model: gpt-4o-mini
+          model-api-key: ${{ secrets.OPENAI_API_KEY }}

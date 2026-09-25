@@ -6,7 +6,7 @@ pull request merges.
 [![CI](https://github.com/YauhenBichel/merge-cheer/actions/workflows/ci.yml/badge.svg)](https://github.com/YauhenBichel/merge-cheer/actions/workflows/ci.yml)
 [![Contributors](https://img.shields.io/github/contributors/YauhenBichel/merge-cheer)](https://github.com/YauhenBichel/merge-cheer/graphs/contributors)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![GitHub Marketplace](https://img.shields.io/badge/GitHub%20Marketplace-v1.5.0-6e5494)](https://github.com/marketplace/actions/merge-cheer)
+[![GitHub Marketplace](https://img.shields.io/badge/GitHub%20Marketplace-v1.8.0-6e5494)](https://github.com/marketplace/actions/merge-cheer)
 [![Code of Conduct](https://img.shields.io/badge/Contributor%20Covenant-2.1-4baaaa.svg)](CODE_OF_CONDUCT.md)
 
 Site: [yauhenbichel.github.io/merge-cheer](https://yauhenbichel.github.io/merge-cheer/) · Marketplace: [merge-cheer](https://github.com/marketplace/actions/merge-cheer)
@@ -15,16 +15,23 @@ GIF on merge, no Giphy key, no checkout of the pull request. The action
 ships its own GIF groups and, by default, picks a **random theme**
 (seeded by the pull request number so the same PR stays stable). Pin a
 group with `topic` when you want one mood every time. Use `topic: title`
-to pick from the title instead.
+to pick from the title and body. A `no-cheer` / `skip-cheer` label (or
+the same words in the title) skips the comment. On merge, the Action thanks
+co-authors (`{authors}`, up to five, from `Co-authored-by` lines with a GitHub
+noreply address) and reviewers. It will not post a second GIF for the
+same moment. A changes-requested cheer does not block the merge cheer. Set an OpenAI-compatible `model` and `model-api-key` for
+one G-rated line about what merged; generic thanks fall back to the
+stdlib path.
 
-![Merge Cheer demo](docs/merge-cheer-demo.mp4)
+[![Merge Cheer demo](docs/merge-cheer-demo-poster.png)](https://yauhenbichel.github.io/merge-cheer/#demo)
 
-18 seconds. What the Action comments, then four shipped themes. Same
-file as the [site demo](https://yauhenbichel.github.io/merge-cheer/#demo).
+Click for the 18-second walkthrough: what the Action comments, then four
+shipped themes. GitHub cannot play video in a README, so the still opens
+the [site demo](https://yauhenbichel.github.io/merge-cheer/#demo).
 
 ## Install
 
-Pin `@v1.5.0` (current release). `@v1` is the older first release.
+Pin `@v1.8.0` for an exact version, or `@v1` to follow the 1.x line.
 The Action never checks out the pull request head.
 
 ### GitHub
@@ -47,60 +54,232 @@ jobs:
     if: github.event.pull_request.merged && github.event.pull_request.user.type != 'Bot'
     runs-on: ubuntu-latest
     steps:
-      - uses: YauhenBichel/merge-cheer@v1.5.0
+      - uses: YauhenBichel/merge-cheer@v1.8.0
 ```
+
+### Use your own GIFs and a note
+
+On merge, pin your GIFs. `note` is an extra line after the thank-you
+(Discord, docs) so locale and the model line still run. Copy
+[examples/celebrate-custom.yml](examples/celebrate-custom.yml). https
+URLs, G-rated, GIFs under 180 KB. The Action does not read pull
+request head.
+
+```yaml
+- uses: YauhenBichel/merge-cheer@v1.8.0
+  with:
+    gifs-path: .github/merge-cheer
+    note: "Come hang out on Discord — https://discord.gg/your-invite"
+```
+
+### Use a model
+
+Zero-config stays `Merged — thank you @author`, or `Merged the readme
+— thank you @author` when the title has a usable word. Add repository secret
+`OPENAI_API_KEY` and copy
+[examples/celebrate-openai.yml](examples/celebrate-openai.yml). Live
+demo: [merge-cheer #53](https://github.com/YauhenBichel/merge-cheer/pull/53#issuecomment-5574024316)
+—*Cheers to YauhenBichel for keeping model cheers that are about the
+pull request!*
+
+[![AI demo](docs/merge-cheer-ai-demo.gif)](https://yauhenbichel.github.io/merge-cheer/#ai)
+
+20 seconds. What the model writes, then the GIF.
+
+This is the model path. Zero-config is still `Merged — thank you
+@author`.
+
+**What.** A human pull request merges. The model writes one short line
+about what landed. The GIF group still comes from `topic`. Default
+`auto` is a random theme. Set `topic: title` to use the title map.
+
+**Why.** “Thanks” is empty. A line that names the work is the cheer
+people actually read.
+
+**How.** One secret. `model: gpt-4o-mini`. One call per merge. A 429
+falls back to the stdlib line.
+
+```yaml
+- uses: YauhenBichel/merge-cheer@v1.8.0
+  with:
+    model: gpt-4o-mini
+    model-api-key: ${{ secrets.OPENAI_API_KEY }}
+```
+
+`@v1.8.0` drops generic thanks. A 429 or a junk reply falls back to
+the stdlib line — it is not retried. The Action still does not check
+out the pull request head.
+
+If the model cannot be reached — no reply within 20 seconds, a network
+error, a strange reply, or a malformed key or base URL — the default
+thank-you is posted anyway. The job logs `model skipped: <reason>` and a
+warning, never the key.
+
+### Use Hugging Face Inference
+
+Add a repository secret `HF_TOKEN` with Inference Providers permission, then
+copy [examples/celebrate-huggingface.yml](examples/celebrate-huggingface.yml)
+onto the default branch. No OpenAI key is needed.
+
+```yaml
+- uses: YauhenBichel/merge-cheer@v1.8.0
+  with:
+    model: meta-llama/Llama-3.1-8B-Instruct:cheapest
+    model-base-url: https://router.huggingface.co/v1
+    model-api-key: ${{ secrets.HF_TOKEN }}
+```
+
+This uses an 8B chat model and the router's `:cheapest` provider policy.
+See [Hugging Face Inference Providers](https://huggingface.co/docs/inference-providers/en/index)
+for routing and billing. Available providers and prices can change.
+One request writes the line; errors, rate limits, and unsafe or generic
+replies still fall back to the default thank-you. The job never checks out
+the pull request head.
+
+### Use Google Gemini
+
+Add a repository secret `GEMINI_API_KEY` from Google AI Studio, then copy
+[examples/celebrate-gemini.yml](examples/celebrate-gemini.yml) onto the default
+branch. If your key is already stored as `GOOGLE_API_KEY`, change only the
+secret reference in `model-api-key` to `${{ secrets.GOOGLE_API_KEY }}`.
+
+```yaml
+- uses: YauhenBichel/merge-cheer@v1.8.0
+  with:
+    model: gemini-2.5-flash-lite
+    model-base-url: https://generativelanguage.googleapis.com/v1beta/openai
+    model-api-key: ${{ secrets.GEMINI_API_KEY }}
+```
+
+This uses Google's [OpenAI-compatible endpoint](https://ai.google.dev/gemini-api/docs/openai),
+not an OpenAI key. The example uses 2.5 Flash-Lite because
+[Gemini 2.0 Flash has been retired](https://ai.google.dev/gemini-api/docs/deprecations).
+Errors, rate limits, and unsafe or generic replies fall back to the default
+thank-you. The workflow never checks out the pull request head; tests need
+no live API key.
+
+### Use Groq
+
+Add a repository secret `GROQ_API_KEY` from your Groq account, then copy
+[examples/celebrate-groq.yml](examples/celebrate-groq.yml) onto the default
+branch. No OpenAI key is needed.
+
+```yaml
+- uses: YauhenBichel/merge-cheer@v1.8.0
+  with:
+    model: openai/gpt-oss-20b
+    model-base-url: https://api.groq.com/openai/v1
+    model-api-key: ${{ secrets.GROQ_API_KEY }}
+```
+
+The example uses Groq's low-cost GPT OSS 20B chat model. See the
+[Groq model page](https://console.groq.com/docs/models)
+for current pricing and limits. Errors, rate limits, and unsafe or generic
+replies fall back to the default thank-you. No pull request head checkout
+or live API key is needed for the tests.
+
+### Use Anthropic Claude
+
+Add a repository secret `ANTHROPIC_API_KEY` using a key scoped to a single
+Anthropic workspace, then copy
+[examples/celebrate-anthropic.yml](examples/celebrate-anthropic.yml) onto the
+default branch. No OpenAI key is needed.
+
+```yaml
+- uses: YauhenBichel/merge-cheer@v1.8.0
+  with:
+    model: claude-haiku-4-5-20251001
+    model-base-url: https://api.anthropic.com/v1
+    model-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+```
+
+This uses Anthropic's [OpenAI compatibility layer](https://platform.claude.com/docs/en/cli-sdks-libraries/libraries/openai-sdk),
+which Anthropic positions for evaluation rather than most production use cases.
+Keys with access to multiple workspaces require an `anthropic-workspace-id`
+header that this Action does not expose; use a single-workspace key here.
+The example pins Haiku 4.5. Errors, rate limits, and unsafe or malformed replies
+fall back to the default thank-you. No pull request head checkout or live key
+is needed for the tests.
+
+### Keep credits low
+
+The model writes only the thank-you line. The GIF group stays from
+`topic` (`auto` is random, `title` is the map). One call per merge,
+then skip if that pull request already has a cheer. Use `gpt-4o-mini`.
+A bigger model does not help one sentence. Pin `message` when you do
+not want a model call.
 
 Also comment when a pull request **closes without a merge**, or when a
 reviewer asks for **more work**. Tone stays kind. Copy
 [examples/celebrate-more.yml](examples/celebrate-more.yml). Close uses
-the `coffee` group. A changes request uses `yeah`. The Action never
-checks out the pull request head.
+the `coffee` group. A changes request uses `yeah`. Add
+[examples/celebrate-more-openai.yml](examples/celebrate-more-openai.yml)
+when you want the model to write those lines too — the GIF group still
+comes from `closed-topic` / `changes-topic`. The Action never
+checks out the pull request head. The full case list is on the
+[site](https://yauhenbichel.github.io/merge-cheer/#cases).
 
 ### GitLab
 
+The Catalog row is not live. Copy the curl job.
+
 1. Copy [examples/gitlab-ci.yml](examples/gitlab-ci.yml) onto the default
-   branch, or include the Catalog component after you publish one
-   ([MARKETPLACES.md](MARKETPLACES.md)).
+   branch.
 2. Add a project access token `GITLAB_TOKEN` with `api` scope.
    `CI_JOB_TOKEN` cannot post merge-request notes.
-3. Push a merge to the default branch. The job finds that merged MR and
-   comments the GIF.
+3. Merge to the default branch. The job finds that MR and comments the
+   GIF. A job that can see a closed or change-requested MR uses those
+   moments instead.
 
 ```yaml
-include:
-  - component: $CI_SERVER_FQDN/YauhenBichel/merge-cheer/merge-cheer@v1.5.0
-    inputs:
-      topic: auto
-      token: $GITLAB_TOKEN
+celebrate:
+  image: python:3.13-alpine
+  variables:
+    TOPIC: auto
+    ACTION_REF: v1.8.0
+    ACTION_REPO: YauhenBichel/merge-cheer
+    ACTION_SHA256: ""   # from the release notes; pins the script
+  script:
+    - apk add --no-cache curl
+    - curl -fsSL "https://raw.githubusercontent.com/YauhenBichel/merge-cheer/${ACTION_REF}/src/celebrate.py" -o /tmp/celebrate.py
+    - if [ -n "$ACTION_SHA256" ]; then echo "$ACTION_SHA256  /tmp/celebrate.py" | sha256sum -c -; fi
+    - python3 /tmp/celebrate.py
 ```
 
-Until the Catalog row exists, the curl job in
-`examples/gitlab-ci.yml` is the working path.
+The script runs with your token. Set `ACTION_SHA256` to the hash in the
+release notes, and the job refuses any other file.
+
+How to publish a Catalog row later: [MARKETPLACES.md](MARKETPLACES.md).
 
 ### Bitbucket
+
+The Docker Hub pipe is not public. Copy the curl job.
 
 1. Copy [examples/bitbucket-pipelines.yml](examples/bitbucket-pipelines.yml)
    onto `main` (or `master`).
 2. Add a secured repository variable `BITBUCKET_ACCESS_TOKEN` with
    pullrequest write.
 3. Merge a pull request into that branch. The step comments the GIF.
+   A job that can see a declined or change-requested PR uses those
+   moments instead.
 
 ```yaml
 script:
-  - pipe: docker://eugenebichel/merge-cheer:1.5.0
-    variables:
-      TOPIC: auto
-      BITBUCKET_ACCESS_TOKEN: $BITBUCKET_ACCESS_TOKEN
+  - export ACTION_REF=v1.8.0
+  - export ACTION_REPO=YauhenBichel/merge-cheer
+  - export TOPIC="${TOPIC:-auto}"
+  - export ACTION_SHA256="${ACTION_SHA256:-}"   # from the release notes
+  - curl -fsSL "https://raw.githubusercontent.com/YauhenBichel/merge-cheer/${ACTION_REF}/src/celebrate.py" -o celebrate.py
+  - if [ -n "$ACTION_SHA256" ]; then echo "$ACTION_SHA256  celebrate.py" | sha256sum -c -; fi
+  - python3 celebrate.py
 ```
 
-Until `eugenebichel/merge-cheer:1.5.0` is on Docker Hub, use the curl
-job in the example. A Pipes UI listing needs an Atlassian review —
-[MARKETPLACES.md](MARKETPLACES.md).
+How to publish a Hub image and Pipes row later: [MARKETPLACES.md](MARKETPLACES.md).
 
 Pin a group:
 
 ```yaml
-- uses: YauhenBichel/merge-cheer@v1.5.0
+- uses: YauhenBichel/merge-cheer@v1.8.0
   with:
     topic: ship   # or party, comic, sunny, game, sticker, yeah
 ```
@@ -116,7 +295,7 @@ to `celebration` and prints the list.
 
 ## Live demo
 
-The video above is the walkthrough. What / why / where / how:
+The still above opens the walkthrough. What / why / where / how:
 
 **What.** Merge Cheer comments one G-rated GIF when a human pull request
 merges. Bots are skipped. The Action does not check out the pull request.
@@ -133,7 +312,7 @@ Real comments already landed on
 and
 [molecare-desktop #26](https://github.com/MoleCare/molecare-desktop/pull/26#issuecomment-5559101123).
 
-**How.** Pin `@v1.5.0` on the default branch (see [Install](#install)).
+**How.** Pin `@v1.8.0` on the default branch (see [Install](#install)).
 Leave `topic` unset (or `topic: auto`) for a random theme, seeded by the
 pull request number. Pin `topic: comic` when you want the same mood
 every time.
@@ -169,14 +348,18 @@ see it move).
 | --- | --- | --- | --- |
 | ![java](gifs/java/mug.gif) | ![python](gifs/python/snake.gif) | ![cpp](gifs/cpp/plus.gif) | ![golang](gifs/golang/gopher.gif) |
 
-The in-the-wild demo is the next merged pull request on this
-repository: [.github/workflows/celebrate.yml](.github/workflows/celebrate.yml)
-runs `uses: ./` and comments one of these GIFs. No merge comment exists
-yet — that workflow is what will write it.
+This repository dogfoods
+[.github/workflows/celebrate.yml](.github/workflows/celebrate.yml)
+(`uses: ./`). Live comments already landed on
+[merge-cheer #53](https://github.com/YauhenBichel/merge-cheer/pull/53#issuecomment-5574024316),
+[py-harness #350](https://github.com/YauhenBichel/py-harness/pull/350#issuecomment-5559092736),
+and
+[molecare-desktop #26](https://github.com/MoleCare/molecare-desktop/pull/26#issuecomment-5559101123).
 
 ## Used by
 
-6 public repositories already run Merge Cheer on the default branch.
+8 public repositories in MoleCare and this account already run Merge
+Cheer on the default branch.
 
 **MoleCare:** [molecare-mcp](https://github.com/MoleCare/molecare-mcp),
 [molecare-ml](https://github.com/MoleCare/molecare-ml),
@@ -184,10 +367,12 @@ yet — that workflow is what will write it.
 [molecare-skin-llm](https://github.com/MoleCare/molecare-skin-llm),
 [.github](https://github.com/MoleCare/.github).
 
-**Personal:** [readme-contributors](https://github.com/YauhenBichel/readme-contributors).
+**Also:** [py-harness](https://github.com/YauhenBichel/py-harness),
+[python-vibe](https://github.com/YauhenBichel/python-vibe),
+[readme-contributors](https://github.com/YauhenBichel/readme-contributors).
 
 To be listed, merge a celebrate workflow that
-`uses: YauhenBichel/merge-cheer@v1.5.0` on the default branch.
+`uses: YauhenBichel/merge-cheer@v1.8.0` on the default branch.
 
 ## Topics
 
@@ -199,8 +384,8 @@ file in the group (stable for a given pull request number).
 | `ship` | `feat`, `add `, `added`, `new `, `launch`, `ship:` | ![ship](gifs/ship/ship-it.gif) |
 | `fix` | `fix`, `bug`, `hotfix`, `patch` | ![fix](gifs/fix/nailed-it.gif) |
 | `docs` | `doc`, `readme` | ![docs](gifs/docs/nice-work.gif) |
-| `tests` | `test`, `ci` | ![tests](gifs/tests/high-five.gif) |
-| `cleanup` | `refactor`, `clean` | ![cleanup](gifs/cleanup/cleanup.gif) |
+| `tests` | `test`, `ci`, `build:` | ![tests](gifs/tests/high-five.gif) |
+| `cleanup` | `refactor`, `clean`, `typo`, `style`, `lint`, `format`, `chore:` | ![cleanup](gifs/cleanup/cleanup.gif) |
 | `celebration` | anything else | ![celebration](gifs/celebration/celebration.gif) |
 | `welcome` | `welcome`, `good first`, first-time contributor | ![welcome](gifs/welcome/high-five.gif) |
 | `party` | `party`, `congrats`, `woo`, `hooray`, `celebrate` | ![party](gifs/party/confetti.gif) |
@@ -229,6 +414,7 @@ file in the group (stable for a given pull request number).
 `welcome` also wins on `topic: title` when GitHub marks the author
 `FIRST_TIME_CONTRIBUTOR` or `FIRST_TIMER` and the title did not match
 another group. It reuses the tests and celebration loops — no extra art.
+The comment adds `First contribution — welcome.` for those authors.
 
 Conventional title types (`fix`, `feat`, `docs`, `test`, `refactor`)
 win before mood keywords, so `feat: add party mode` still ships.
@@ -252,17 +438,28 @@ before `qa`. `feat: add python client` still ships.
 | Input | Default | What it does |
 | --- | --- | --- |
 | `github-token` | `${{ github.token }}` | Posts the comment |
-| `topic` | `auto` | Group name, `auto` for a random theme, or `title` to pick from the PR title |
+| `topic` | `auto` | Group name, `auto` for a random theme, or `title` to pick from the PR title and body |
 | `giphy-api-key` | empty | Optional. When set, try a G-rated Giphy GIF first |
-| `message` | `Merged — thank you @{author}.` | `{author}` becomes the PR author |
+| `gifs` | empty | Optional https image URLs (comma or newline). Merge only. One is picked, seeded by the pull request number |
+| `gifs-path` | empty | Optional folder on the default branch of `.gif` / `.webp` / `.png` files. Listed via the GitHub API |
+| `note` | empty | Optional extra line after the thank-you (Discord, docs). G-rated. Does not replace `message` |
+| `message` | `Merged — thank you @{author}.` | `{author}` becomes `@login` so GitHub notifies them; `{authors}` adds up to five human co-authors (GitHub noreply `Co-authored-by` lines) and reviewers, on merge only |
+| `locale` | `en` | Default thank-you and first-timer language (`en`, `es`, `de`, `fr`, `pt`, `uk`, `it`, `be`, `ja`). Unknown codes fall back to English. A pinned `message` wins |
+| `closed-topic` / `closed-message` | `coffee` / closed thanks | Used when a pull request closes without a merge |
+| `changes-topic` / `changes-message` | `yeah` / more-work line | Used when a reviewer asks for more work |
+| `model` | empty | Optional chat model for the thank-you line only. GIF group stays from `topic` (`auto` is random, `title` is the map) |
+| `model-api-key` | empty | Optional OpenAI-compatible key. Unset keeps the stdlib path |
+| `model-base-url` | empty | Optional OpenAI-compatible API root |
 | `rating` | `g` | Giphy rating when a key is set |
 
 ```yaml
-- uses: YauhenBichel/merge-cheer@v1.5.0
+- uses: YauhenBichel/merge-cheer@v1.8.0
   with:
     topic: welcome
     giphy-api-key: ${{ secrets.GIPHY_API_KEY }}
-    message: "Shipped. Thank you @{author}."
+    message: "Shipped. Thank you @{authors}."
+    # model: gpt-4o-mini
+    # model-api-key: ${{ secrets.OPENAI_API_KEY }}
 ```
 
 ## Why this instead of a random Giphy Action
@@ -285,8 +482,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Please follow the
 [Code of Conduct](CODE_OF_CONDUCT.md).
 
 A good first change is another GIF in an existing group folder, or a
-title keyword for a group, plus a test. Open issues:
-[`good first issue`](https://github.com/YauhenBichel/merge-cheer/labels/good%20first%20issue).
+title keyword for a group, plus a test. If
+[`good first issue`](https://github.com/YauhenBichel/merge-cheer/labels/good%20first%20issue)
+is empty, open an issue first — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ```bash
 python3 -m unittest discover -s tests -q
@@ -294,8 +492,8 @@ python3 -m unittest discover -s tests -q
 
 ## Publish a release
 
-Current release is `v1.5.0` (`@v1` is the first tag, not a floating
-major). Listed on the [GitHub Marketplace](https://github.com/marketplace/actions/merge-cheer).
+Current release is `v1.8.0`. `@v1` now moves with each 1.x release, so
+pinning it follows the line rather than freezing on the first tag. Listed on the [GitHub Marketplace](https://github.com/marketplace/actions/merge-cheer).
 A reviewed Release is tests plus a human review — see [RELEASE.md](RELEASE.md).
 Pushing a tag does not publish. Later releases update the existing listing.
 
@@ -327,10 +525,13 @@ Thank you to everyone who has helped.
 
 <!-- readme: contributors,bots/- -start -->
 <p align="center">
-  <a href="https://github.com/YauhenBichel" title="Yauhen Bichel"><img src=".github/faces/YauhenBichel.svg" width="87" height="99" alt="Yauhen Bichel" /></a>
-  <a href="https://github.com/HeaTTap" title="HeaTTap"><img src=".github/faces/HeaTTap.svg" width="66" height="75" alt="HeaTTap" /></a>
-  <a href="https://github.com/Som0111" title="Soumya Padhi"><img src=".github/faces/Som0111.svg" width="72" height="82" alt="Soumya Padhi" /></a>
+  <a href="https://github.com/YauhenBichel" title="Yauhen Bichel" aria-label="Yauhen Bichel"><img src=".github/faces/YauhenBichel.svg" width="87" height="99" alt="Yauhen Bichel" /></a>
+  <a href="https://github.com/Gambit-Checkmate" title="Checkmate" aria-label="Checkmate"><img src=".github/faces/Gambit-Checkmate.svg" width="66" height="75" alt="Checkmate" /></a>
+  <a href="https://github.com/HeaTTap" title="HeaTTap" aria-label="HeaTTap"><img src=".github/faces/HeaTTap.svg" width="72" height="82" alt="HeaTTap" /></a>
+  <a href="https://github.com/Jo-shreer" title="Jyoti Gupta" aria-label="Jyoti Gupta"><img src=".github/faces/Jo-shreer.svg" width="80" height="91" alt="Jyoti Gupta" /></a>
+  <a href="https://github.com/Som0111" title="Soumya Padhi" aria-label="Soumya Padhi"><img src=".github/faces/Som0111.svg" width="63" height="72" alt="Soumya Padhi" /></a>
 </p>
+<p align="center"><em>The contributors wall proudly displays the names of five dedicated individuals.</em></p>
 <!-- readme: contributors,bots/- -end -->
 
-Filled from GitHub commits (bots omitted). Live demo: [readme-contributors](https://github.com/YauhenBichel/readme-contributors#live-demo).
+Filled from the GitHub contributors API (bots omitted). Live demo: [readme-contributors](https://github.com/YauhenBichel/readme-contributors#live-demo).

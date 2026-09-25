@@ -1,19 +1,21 @@
-name: Celebrate merge
+# Closed and changes, plus one model line about the pull request.
+# The GIF group still comes from closed-topic / changes-topic, not
+# from the model. Stdlib-only copy: examples/celebrate-more.yml.
+#
+# Settings → Secrets → Actions → New repository secret:
+#   Name: OPENAI_API_KEY
+#   Value: your OpenAI (or OpenAI-compatible) key
+#
+# @v1.7.0 drops generic thanks.
 
-# Live demo in the wild: GIF on merge, on close, and when a
-# reviewer asks for more work. Checkout is the default branch
-# only — never the pull request head. A no-cheer / skip-cheer
-# label skips the comment. A second run on the same PR does not
-# post another GIF. First-time authors get a welcome line.
+name: Celebrate merge
 on:
   pull_request_target:
     types: [closed]
   pull_request_review:
     types: [submitted]
-
 permissions:
   pull-requests: write
-
 jobs:
   celebrate:
     if: >
@@ -27,11 +29,9 @@ jobs:
       )
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          ref: ${{ github.event.repository.default_branch }}
-          persist-credentials: false
-      - uses: ./
+      - uses: YauhenBichel/merge-cheer@v1.8.0
         with:
           model: gpt-4o-mini
           model-api-key: ${{ secrets.OPENAI_API_KEY }}
+          # closed-topic: coffee
+          # changes-topic: yeah

@@ -1,5 +1,5 @@
 name: Merge Cheer
-image: eugenebichel/merge-cheer:1.5.0
+image: eugenebichel/merge-cheer:1.7.0
 description: Comment a G-rated celebration GIF when a pull request merges. No Giphy key.
 category: Utilities
 repository: https://github.com/YauhenBichel/merge-cheer
@@ -18,7 +18,10 @@ variables:
     description: GIF group. auto picks a random theme. Pin python, devops, comic, …
   - name: MESSAGE
     default: "Merged — thank you @{author}."
+  - name: LOCALE
+    default: en
+    description: Default thank-you language. en, es, de, fr, pt, uk, it, be, ja. Unknown codes fall back to English.
   - name: ACTION_REF
-    default: v1.5.0
+    default: v1.8.0
   - name: GIPHY_API_KEY
     default: ""
